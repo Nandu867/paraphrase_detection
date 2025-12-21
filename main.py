@@ -20,6 +20,8 @@ import re
 from itertools import combinations
 import Levenshtein  # for edit distance
 import warnings
+from datasets import load_dataset
+import json
 warnings.filterwarnings('ignore')
 
 # =============================================================================
@@ -247,17 +249,19 @@ class ParaphraseClassifier:
 
     def __init__(self):
         """Initialize classifier and scaler"""
-        self.classifier = LogisticRegression(random_state=42)
+        self.classifier = LogisticRegression(random_state=42, max_iter=1000)
         self.scaler = StandardScaler()
         self.is_trained = False
+        self.model_path = 'paraphrase_classifier.pkl'
+        self.training_cache_path = 'training_data_cache.pkl'
 
     def train(self, X: np.ndarray, y: np.ndarray):
         """
-        Train the classifier on labeled data.
+        Train the classifier on features and labels.
 
         Args:
-            X: Feature matrix (n_samples, n_features)
-            y: Labels (n_samples,) - 1 for paraphrase, 0 for not paraphrase
+            X: Feature matrix
+            y: Label vector
         """
         # Scale features
         X_scaled = self.scaler.fit_transform(X)
@@ -309,13 +313,25 @@ class ParaphraseClassifier:
                         'scaler': self.scaler,
                          'is_trained': self.is_trained}, f)
 
-    def load_model(self, path: str):
+    def load_model(self, path: str = None):
         """Load trained model from disk"""
-        with open(path, 'rb') as f:
-            data = pickle.load(f)
-            self.classifier = data['classifier']
-            self.scaler = data['scaler']
-            self.is_trained = data['is_trained']
+        if path is None:
+            path = self.model_path
+
+        if not os.path.exists(path):
+            return False
+
+        try:
+            with open(path, 'rb') as f:
+                data = pickle.load(f)
+                self.classifier = data['classifier']
+                self.scaler = data['scaler']
+                self.is_trained = data['is_trained']
+            return True
+        except Exception as e:
+            print(f"Error loading model: {e}")
+            return False
+
 
 # =============================================================================
 # 5. MAIN PARAPHRASE DETECTION ENGINE
@@ -325,12 +341,29 @@ class ParaphraseClassifier:
 class ParaphraseDetector:
     """Main engine combining all components"""
 
-    def __init__(self):
-        """Initialize all modules"""
+    def __init__(self, auto_train: bool = True, use_trained_model: bool = True):
+        """
+        Initialize all modules.
+
+        Args:
+            auto_train: Whether to automatically load pre-trained model if it exists
+            use_trained_model: Whether to use trained model (if loaded) or threshold-based approach
+        """
         self.pdf_extractor = PDFExtractor()
         self.text_preprocessor = TextPreprocessor()
         self.feature_extractor = HybridFeatureExtractor()
         self.classifier = ParaphraseClassifier()
+        self.use_trained_model = use_trained_model
+
+        # Try to load pre-trained model at startup
+        if auto_train:
+            loaded = self.classifier.load_model()
+            if loaded:
+                self.training_metrics = {'loaded_from_disk': True}
+            else:
+                self.training_metrics = None
+        else:
+            self.training_metrics = None
 
     def process_pdf(self, pdf_file) -> List[str]:
         """
@@ -351,19 +384,25 @@ class ParaphraseDetector:
         return sentences
 
     def detect_paraphrases(self, sentences: List[str],
-                           threshold: float = 0.7) -> List[Dict]:
+                           threshold: float = 0.7,
+                           use_trained: bool = None) -> List[Dict]:
         """
         Detect paraphrases among sentences.
 
         Args:
             sentences: List of sentences to compare
             threshold: Similarity threshold for paraphrase detection
+            use_trained: Whether to use trained model (None = use instance setting)
 
         Returns:
             List[Dict]: List of paraphrase pairs with scores
         """
         if len(sentences) < 2:
             return []
+
+        # Determine which model to use
+        use_model = use_trained if use_trained is not None else self.use_trained_model
+        use_model = use_model and self.classifier.is_trained
 
         # Generate embeddings for all sentences
         embeddings = self.feature_extractor.get_sbert_embeddings(sentences)
@@ -379,8 +418,13 @@ class ParaphraseDetector:
             )
 
             # Get prediction probability
-            proba = self.classifier.predict_proba(
-                features.reshape(1, -1))[0][1]
+            if use_model:
+                # Use trained classifier
+                proba = self.classifier.predict_proba(
+                    features.reshape(1, -1))[0][1]
+            else:
+                # Use threshold-based approach on cosine similarity
+                proba = features[0]  # cosine_similarity
 
             # If probability exceeds threshold, consider it a paraphrase
             if proba >= threshold:
@@ -432,6 +476,32 @@ def main():
 
     # Sidebar
     st.sidebar.header("Settings")
+
+    # Model selection
+    st.sidebar.markdown("---")
+    st.sidebar.header("📊 Model Selection")
+
+    # Initialize detector first
+    if 'detector' not in st.session_state:
+        st.session_state.detector = ParaphraseDetector(auto_train=True)
+
+    detector = st.session_state.detector
+
+    # Show model status
+    if detector.classifier.is_trained:
+        st.sidebar.success("✅ Trained Model Available")
+        use_trained = st.sidebar.checkbox("Use Trained Model", value=True,
+                                          help="Use the supervised classifier (if unchecked, uses threshold-based approach)")
+        detector.use_trained_model = use_trained
+
+        if detector.training_metrics and 'loaded_from_disk' in detector.training_metrics:
+            st.sidebar.info("📁 Model loaded from disk")
+    else:
+        st.sidebar.warning("⚠️ No trained model loaded")
+        st.sidebar.info("Using threshold-based cosine similarity")
+        use_trained = False
+
+    st.sidebar.markdown("---")
     threshold = st.sidebar.slider(
         "Similarity Threshold",
         min_value=0.0,
@@ -451,6 +521,23 @@ def main():
     5. Results are displayed with scores
     """)
 
+    # Model training section
+    st.sidebar.markdown("---")
+    st.sidebar.header("🎓 Model Training")
+
+    # Training button
+    if st.sidebar.button("🚀 Train Model on Quora Dataset"):
+        st.sidebar.error("⚠️ Training requires quora_duplicate_questions.csv\n\nPlease run: python train.py\n\n"
+                         "Dataset: https://www.kaggle.com/quora/question-pairs-dataset")
+
+    st.sidebar.markdown("""
+    **To train the model:**
+    1. Download Quora dataset from Kaggle
+    2. Save as `quora_duplicate_questions.csv`
+    3. Run: `python train.py`
+    4. Reload Streamlit app
+    """)
+
     # File upload
     st.header("1. Upload PDF Document")
     uploaded_file = st.file_uploader(
@@ -461,10 +548,11 @@ def main():
 
     if uploaded_file is not None:
         with st.spinner("Processing PDF..."):
-            # Initialize detector
-            detector = ParaphraseDetector()
+            # Use detector from session state
+            if 'detector' not in st.session_state:
+                st.session_state.detector = ParaphraseDetector(auto_train=True)
 
-            # Process PDF
+            detector = st.session_state.detector
             sentences = detector.process_pdf(uploaded_file)
 
             if len(sentences) == 0:
@@ -483,7 +571,7 @@ def main():
 
             with st.spinner("Analyzing sentence pairs for paraphrases..."):
                 paraphrase_pairs = detector.detect_paraphrases(
-                    sentences, threshold)
+                    sentences, threshold, use_trained=use_trained)
 
             if len(paraphrase_pairs) == 0:
                 st.warning("No paraphrases detected above the threshold.")

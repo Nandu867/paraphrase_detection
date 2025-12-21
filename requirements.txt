@@ -11,3 +11,4 @@ python-Levenshtein>=0.21.0
 # Additional Requirements
 torch>=2.0.0
 transformers>=4.30.0
+datasets>=2.14.0
