@@ -292,6 +292,7 @@ class QuoraTrainer:
         model_data = {
             'classifier': self.classifier,
             'scaler': self.scaler,
+            'is_trained': True,
             'model_name': self.model_name,
             'metrics': self.metrics
         }

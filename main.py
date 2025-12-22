@@ -324,12 +324,24 @@ class ParaphraseClassifier:
         try:
             with open(path, 'rb') as f:
                 data = pickle.load(f)
-                self.classifier = data['classifier']
-                self.scaler = data['scaler']
-                self.is_trained = data['is_trained']
+                self.classifier = data.get('classifier')
+                self.scaler = data.get('scaler')
+                self.is_trained = data.get('is_trained', False)
+
+                # If the loaded data is incomplete, delete the corrupt file and return False
+                if self.classifier is None or self.scaler is None:
+                    os.remove(path)
+                    print(f"Removed corrupt model file: {path}")
+                    return False
             return True
         except Exception as e:
             print(f"Error loading model: {e}")
+            # Remove corrupt model file
+            try:
+                os.remove(path)
+                print(f"Removed corrupt model file: {path}")
+            except:
+                pass
             return False
 
 
@@ -596,7 +608,7 @@ def main():
                         })
 
                     df = pd.DataFrame(summary_data)
-                    st.dataframe(df, use_container_width=True)
+                    st.dataframe(df, use_container_width=True, height=400)
 
                     # Download button
                     csv = df.to_csv(index=False)
