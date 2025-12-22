@@ -550,13 +550,18 @@ def main():
     4. Reload Streamlit app
     """)
 
-    # File upload
-    st.header("1. Upload PDF Document")
-    uploaded_file = st.file_uploader(
-        "Choose a PDF file",
-        type=['pdf'],
-        help="Upload a single PDF document for paraphrase analysis"
-    )
+    # Main content tabs
+    st.markdown("---")
+    main_tabs = st.tabs(["🔍 Paraphrase Detection", "📊 Compare Two PDFs"])
+
+    with main_tabs[0]:
+        # Original paraphrase detection section
+        st.header("1. Upload PDF Document")
+        uploaded_file = st.file_uploader(
+            "Choose a PDF file",
+            type=['pdf'],
+            help="Upload a single PDF document for paraphrase analysis"
+        )
 
     if uploaded_file is not None:
         with st.spinner("Processing PDF..."):
@@ -657,6 +662,197 @@ def main():
                                       f"{pair['edit_distance_similarity']:.3f}")
 
                         st.markdown("---")
+
+    with main_tabs[1]:
+        # PDF Comparison section
+        st.header("📊 Compare Two PDFs")
+        st.markdown(
+            "Upload two PDF documents to measure their overall similarity.")
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+            st.subheader("PDF 1")
+            pdf_file_1 = st.file_uploader(
+                "Choose first PDF",
+                type=['pdf'],
+                key='pdf1',
+                help="Upload first PDF for comparison"
+            )
+
+        with col2:
+            st.subheader("PDF 2")
+            pdf_file_2 = st.file_uploader(
+                "Choose second PDF",
+                type=['pdf'],
+                key='pdf2',
+                help="Upload second PDF for comparison"
+            )
+
+        if pdf_file_1 is not None and pdf_file_2 is not None:
+            with st.spinner("Comparing PDFs..."):
+                if 'detector' not in st.session_state:
+                    st.session_state.detector = ParaphraseDetector(
+                        auto_train=True)
+
+                detector = st.session_state.detector
+
+                # Extract text from both PDFs
+                sentences_1 = detector.process_pdf(pdf_file_1)
+                sentences_2 = detector.process_pdf(pdf_file_2)
+
+                if len(sentences_1) == 0 or len(sentences_2) == 0:
+                    st.error("Could not extract text from one or both PDFs")
+                else:
+                    # Calculate similarity between all sentence pairs from both PDFs
+                    from sklearn.metrics.pairwise import cosine_similarity
+
+                    # Get embeddings
+                    embeddings_1 = detector.feature_extractor.get_sbert_embeddings(
+                        sentences_1)
+                    embeddings_2 = detector.feature_extractor.get_sbert_embeddings(
+                        sentences_2)
+
+                    # Compute similarity matrix
+                    similarity_matrix = cosine_similarity(
+                        embeddings_1, embeddings_2)
+
+                    # Calculate overall similarity metrics
+                    # Use average of best matches per sentence (more meaningful)
+                    avg_max_per_sentence = float(
+                        similarity_matrix.max(axis=1).mean())
+                    max_similarity = float(similarity_matrix.max())
+                    # Also calculate mean of high-scoring pairs (>0.5) for reference
+                    high_scoring_pairs = similarity_matrix[similarity_matrix > 0.5]
+                    if len(high_scoring_pairs) > 0:
+                        mean_high_scores = float(high_scoring_pairs.mean())
+                    else:
+                        mean_high_scores = 0.0
+
+                    # Use avg_max_per_sentence as primary overall similarity
+                    overall_similarity = avg_max_per_sentence
+
+                    # Display metrics
+                    st.markdown("### 📈 Similarity Metrics")
+                    metric_col1, metric_col2, metric_col3, metric_col4 = st.columns(
+                        4)
+
+                    with metric_col1:
+                        st.metric(
+                            "Overall Similarity",
+                            f"{overall_similarity:.1%}",
+                            help="Average of best matches for each sentence (best indicator)"
+                        )
+
+                    with metric_col2:
+                        st.metric(
+                            "Maximum Similarity",
+                            f"{max_similarity:.1%}",
+                            help="Highest similarity between any two sentences"
+                        )
+
+                    with metric_col3:
+                        st.metric(
+                            "High-Scoring Pairs (>0.5)",
+                            f"{len(high_scoring_pairs)}/{similarity_matrix.size}",
+                            help="Number of sentence pairs with similarity > 0.5"
+                        )
+
+                    with metric_col4:
+                        st.metric(
+                            "Sentences (PDF1/PDF2)",
+                            f"{len(sentences_1)}/{len(sentences_2)}"
+                        )
+
+                    st.markdown("---")
+
+                    # Show detailed comparison
+                    if st.checkbox("Show Detailed Matching Pairs", value=True):
+                        st.subheader("🔍 Top Matching Sentence Pairs")
+
+                        # Get top pairs
+                        top_n = st.slider(
+                            "Number of top pairs to show", 1, 20, 10)
+
+                        # Flatten and sort
+                        pair_scores = []
+                        for i in range(len(sentences_1)):
+                            for j in range(len(sentences_2)):
+                                score = float(similarity_matrix[i, j])
+                                if score > 0.3:  # Only show relevant matches
+                                    pair_scores.append({
+                                        'pdf1_idx': i,
+                                        'pdf2_idx': j,
+                                        'score': score,
+                                        'sentence_1': sentences_1[i][:100] + '...' if len(sentences_1[i]) > 100 else sentences_1[i],
+                                        'sentence_2': sentences_2[j][:100] + '...' if len(sentences_2[j]) > 100 else sentences_2[j]
+                                    })
+
+                        # Sort by score
+                        pair_scores.sort(
+                            key=lambda x: x['score'], reverse=True)
+
+                        if pair_scores:
+                            # Create DataFrame
+                            comparison_df = pd.DataFrame([
+                                {
+                                    'PDF 1 (Index)': p['pdf1_idx'],
+                                    'PDF 2 (Index)': p['pdf2_idx'],
+                                    'Similarity': f"{p['score']:.3f}",
+                                    'PDF 1 Sentence': p['sentence_1'],
+                                    'PDF 2 Sentence': p['sentence_2']
+                                }
+                                for p in pair_scores[:top_n]
+                            ])
+
+                            st.dataframe(
+                                comparison_df, use_container_width=True, height=400)
+
+                            # Export option
+                            csv = comparison_df.to_csv(index=False)
+                            st.download_button(
+                                label="📥 Download Comparison as CSV",
+                                data=csv,
+                                file_name="pdf_comparison.csv",
+                                mime="text/csv"
+                            )
+                        else:
+                            st.info(
+                                "No matching pairs found with similarity > 0.30")
+
+                    # Show similarity heatmap info
+                    st.subheader("📊 Similarity Distribution")
+                    col1, col2 = st.columns(2)
+
+                    with col1:
+                        st.write("**Similarity Score Ranges:**")
+                        high_similarity = (similarity_matrix > 0.8).sum()
+                        medium_similarity = ((similarity_matrix >= 0.5) & (
+                            similarity_matrix <= 0.8)).sum()
+                        low_similarity = (similarity_matrix < 0.5).sum()
+                        total_pairs = similarity_matrix.size
+
+                        st.text(
+                            f"Very High (>0.80):  {high_similarity}/{total_pairs} pairs ({high_similarity/total_pairs*100:.1f}%)")
+                        st.text(
+                            f"Medium (0.50-0.80): {medium_similarity}/{total_pairs} pairs ({medium_similarity/total_pairs*100:.1f}%)")
+                        st.text(
+                            f"Low (<0.50):        {low_similarity}/{total_pairs} pairs ({low_similarity/total_pairs*100:.1f}%)")
+
+                    with col2:
+                        st.write("**Interpretation:**")
+                        if overall_similarity > 0.75:
+                            st.success(
+                                "✅ Documents are highly similar (likely duplicate or very similar content)")
+                        elif overall_similarity > 0.6:
+                            st.info(
+                                "ℹ️ Documents have significant similarity (substantial content overlap)")
+                        elif overall_similarity > 0.4:
+                            st.warning(
+                                "⚠️ Documents have some similarity (partial overlap)")
+                        else:
+                            st.error(
+                                "❌ Documents are largely different (minimal similarity)")
 
     # Footer
     st.sidebar.markdown("---")
